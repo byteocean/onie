@@ -402,6 +402,21 @@ make_str_opt()
     printf %02X%02X%s $code ${#str} $(str2hex $str)
 }
 
+# turn string into hex with prefixed length (as 16-bit hex word),
+# needed by DHCPv6 options whose length field is 16 bits
+str2lenhex16()
+{
+    local str="$1"
+    printf "%04X%s" ${#str} $(str2hex $str)
+}
+
+make_str_opt16()
+{
+    local code="$1"
+    local str="$2"
+    printf %04X%04X%s $code ${#str} $(str2hex $str)
+}
+
 # generic udhcpc args
 udhcpc_args()
 {
@@ -422,6 +437,56 @@ udhcpc_args()
     local payload="${udhcp_vivso_machine}${udhcp_vivso_arch}${udhcp_vivso_machine_rev}"
     local len=$(( ${#payload} / 2 ))
     local udhcp_vivso="-x 125:$(printf %08X%02X%s $onie_iana_enterprise $len $payload)"
+    echo "$udhcp_args" "$udhcp_user_class" "$udhcp_client_id" "$udhcp_vivso"
+}
+
+# Wait for IPv6 Duplicate Address Detection (DAD) to complete on an
+# interface: returns once no address is left in tentative state.
+# Polls like the tentative-address loop in neigh_discovery() in
+# bin/discover.
+wait_dad()
+{
+    local intf=$1
+    local cnt=30
+    while [ $cnt -gt 0 ] ; do
+        ip addr show dev $intf | grep -q tentative || return 0
+        cnt=$(( $cnt - 1 ))
+        sleep 0.1
+    done
+    return 0
+}
+
+# generic udhcpc6 args
+udhcpc6_args()
+{
+    # vendor class - DHCPv6 option 16 - format <enterprise>:<string>,
+    # parsed by busybox d6_alloc_vendor_option().  Use ONIE's IANA
+    # enterprise number, like the DHCPv4 option 125 encoding above.
+    local udhcp_args="-q -S -V ${onie_iana_enterprise}:onie_vendor:${onie_platform}"
+
+    # user class - option 15 - string in hex
+    local user_class="${onie_dhcp_user_class:-onie_dhcp_user_class}"
+    local udhcp_user_class="-x 15:$(str2lenhex16 "$user_class")"
+
+    # client id - option 1 - DUID-EN (type 2, vendor-assigned unique ID
+    # based on enterprise number):
+    #   2 bytes type (0x0002) + 4 bytes enterprise number + identifier
+    local enterprise_hex=$(printf "%08X" $(onie-sysinfo -i))
+    local identifier_hex=$(str2hex $(onie-sysinfo -s))
+    local udhcp_client_id="-x 1:0002${enterprise_hex}${identifier_hex}"
+
+    # vendor specific information - DHCPv6 option 17
+    # 4 bytes enterprise number + sub-options.  The sub-option codes
+    # 3/4/5 carry the same data as DHCPv4 option 125 above:
+    #   sub-option 3 - machine
+    #   sub-option 4 - CPU architecture
+    #   sub-option 5 - machine revision
+    local sub_opt_machine=$(make_str_opt16 3 $onie_machine)
+    local sub_opt_arch=$(make_str_opt16 4 $onie_arch)
+    local sub_opt_rev=$(make_str_opt16 5 $onie_machine_rev)
+    local payload="${sub_opt_machine}${sub_opt_arch}${sub_opt_rev}"
+    local udhcp_vivso="-x 17:${enterprise_hex}${payload}"
+
     echo "$udhcp_args" "$udhcp_user_class" "$udhcp_client_id" "$udhcp_vivso"
 }
 

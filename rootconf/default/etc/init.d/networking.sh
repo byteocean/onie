@@ -29,15 +29,52 @@ config_ethmgmt_static()
 }
 
 # DHCPv6 ethernet management configuration
+# IPv6 configuration is additive: IPv4 is configured independently by
+# config_ethmgmt(), so a successful (or failing) DHCPv6 exchange never
+# affects the IPv4 result.
 config_ethmgmt_dhcp6()
 {
     intf=$1
     shift
 
-    # TODO
-    # log_info_msg "TODO: Checking for DHCPv6 ethmgmt configuration."
+    # Numerous machines ship their own copy of /lib/onie/functions that
+    # may predate udhcpc6_args; skip DHCPv6 gracefully on those.
+    if ! command -v udhcpc6_args > /dev/null 2>&1 ; then
+        log_info_msg "Skipping DHCPv6 on $intf: udhcpc6_args not available"
+        return 1
+    fi
 
-    return 1
+    # Solicits are sent with a link-local source address (busybox
+    # udhcpc6), so the link-local address must have completed DAD.
+    # Same polling pattern as neigh_discovery() in bin/discover.
+    wait_dad $intf
+
+    # no default args
+    udhcp_args="$(udhcpc6_args) -n -o"
+    if [ "$1" = "discover" ] ; then
+        udhcp_args="$udhcp_args -t 5 -T 3"
+    else
+        udhcp_args="$udhcp_args -t 15 -T 3"
+    fi
+
+    # Request options:
+    # 23: DNS recursive name server
+    # 24: Domain Search List
+    # 39: Client FQDN
+    udhcp_request_opts="-O 23 -O 24 -O 39"
+
+    log_info_msg "Trying DHCPv6 on interface: $intf"
+    udhcpc6 $udhcp_args $udhcp_request_opts \
+           -i $intf -s /lib/onie/udhcp6_net > /dev/null 2>&1
+    if [ "$?" = "0" ] ; then
+        local ipaddr=$(ip -6 addr show dev $intf scope global | awk '/inet6 / { split($2, a, "/"); print a[1] }')
+        log_console_msg "Using DHCPv6 addr: ${intf}: $ipaddr"
+    else
+        log_warning_msg "Unable to configure interface using DHCPv6: $intf"
+        return 1
+    fi
+
+    return 0
 }
 
 # DHCPv4 ethernet management configuration
@@ -171,10 +208,13 @@ config_ethmgmt()
             continue
         }
         config_ethmgmt_static    $params || \
-            config_ethmgmt_dhcp6 $params || \
             config_ethmgmt_dhcp4 $params || \
             config_ethmgmt_fallback $intf_counter $params || \
             eval "result_${intf}=1"
+        # DHCPv6 runs in addition to (never instead of) the IPv4
+        # configuration above: on dual-stack networks both address
+        # families get configured.  Its result does not affect $result.
+        config_ethmgmt_dhcp6 $params
         intf_counter=$(( $intf_counter + 1))
     done
     for intf in $intf_list ; do
